@@ -5,10 +5,11 @@
  * - Data stored in KV (LINKS): categories & links
  * - UI:
  *   - Google search bar
- *   - Mouse wheel to switch categories
+ *   - Homepage-style multi-group dashboard (column/row + collapse + per-group columns)
  *   - Category manager: drag-sort + rename + delete (move links)
  *   - Links: drag-sort + cross-category move
  *   - Add/Edit/Delete links (auto favicon)
+ *   - Group layout config persisted in KV (maxGroupColumns + per-group style/columns/collapsed)
  *   - Light/Dark toggle (localStorage), default follow system
  *
  * Required KV bindings:
@@ -107,6 +108,24 @@ export default {
         return json(data, 200);
       }
 
+      // get layout
+      if (url.pathname === "/api/layout" && request.method === "GET") {
+        const data = await loadLinks(env);
+        return json({ ok: true, layout: data.layout, data }, 200);
+      }
+
+      // save layout
+      if (url.pathname === "/api/layout" && request.method === "POST") {
+        const body = await safeJson(request);
+        const layout = body?.layout;
+        if (!layout || typeof layout !== "object") return json({ error: "layout required" }, 400);
+
+        const data = await loadLinks(env);
+        data.layout = layout;
+        const saved = await saveLinks(env, data);
+        return json({ ok: true, layout: saved.layout, data: saved }, 200);
+      }
+
       // add link (supports creating new category)
       if (url.pathname === "/api/links" && request.method === "POST") {
         const body = await safeJson(request);
@@ -140,8 +159,8 @@ export default {
           icon: icon || faviconFromUrl(linkUrl),
         });
 
-        await env.LINKS.put(LINKS_KEY, JSON.stringify(data, null, 2));
-        return json({ ok: true, data }, 200);
+        const saved = await saveLinks(env, data);
+        return json({ ok: true, data: saved }, 200);
       }
 
       // edit link
@@ -173,8 +192,8 @@ export default {
           }
         }
 
-        await env.LINKS.put(LINKS_KEY, JSON.stringify(data, null, 2));
-        return json({ ok: true, data }, 200);
+        const saved = await saveLinks(env, data);
+        return json({ ok: true, data: saved }, 200);
       }
 
       // delete link
@@ -192,8 +211,8 @@ export default {
         }
         if (!deleted) return json({ error: "not found" }, 404);
 
-        await env.LINKS.put(LINKS_KEY, JSON.stringify(data, null, 2));
-        return json({ ok: true, data }, 200);
+        const saved = await saveLinks(env, data);
+        return json({ ok: true, data: saved }, 200);
       }
 
       // reorder categories / links
@@ -205,8 +224,8 @@ export default {
         const stored = await loadLinks(env);
         const next = applyReorder(stored, patch);
 
-        await env.LINKS.put(LINKS_KEY, JSON.stringify(next, null, 2));
-        return json({ ok: true, data: next }, 200);
+        const saved = await saveLinks(env, next);
+        return json({ ok: true, data: saved }, 200);
       }
 
       // rename category
@@ -221,8 +240,8 @@ export default {
         if (!cat) return json({ error: "not found" }, 404);
 
         cat.name = newName;
-        await env.LINKS.put(LINKS_KEY, JSON.stringify(data, null, 2));
-        return json({ ok: true, data }, 200);
+        const saved = await saveLinks(env, data);
+        return json({ ok: true, data: saved }, 200);
       }
 
       // ✅ delete category (move links to another category, keep at least 1 category)
@@ -252,8 +271,8 @@ export default {
         target.links.push(...(removed.links || []));
         data.categories.splice(idx, 1);
 
-        await env.LINKS.put(LINKS_KEY, JSON.stringify(data, null, 2));
-        return json({ ok: true, data }, 200);
+        const saved = await saveLinks(env, data);
+        return json({ ok: true, data: saved }, 200);
       }
 
       return json({ error: "Not found" }, 404);
@@ -280,7 +299,7 @@ async function loadLinks(env) {
   }
 
   // Empty template: only one empty category, no links
-  const seed = {
+  const seed = normalizeLinks({
     categories: [
       {
         id: uid(),
@@ -288,10 +307,16 @@ async function loadLinks(env) {
         links: [],
       },
     ],
-  };
+  });
 
   await env.LINKS.put(LINKS_KEY, JSON.stringify(seed, null, 2));
   return seed;
+}
+
+async function saveLinks(env, data) {
+  const next = normalizeLinks(data);
+  await env.LINKS.put(LINKS_KEY, JSON.stringify(next, null, 2));
+  return next;
 }
 
 function normalizeLinks(data) {
@@ -315,7 +340,35 @@ function normalizeLinks(data) {
     });
   }
   if (!out.categories.length) out.categories = [{ id: uid(), name: "✨ 开始使用（可重命名）", links: [] }];
+  out.layout = normalizeLayout(data?.layout, out.categories);
   return out;
+}
+
+function normalizeLayout(layout, categories) {
+  const base = layout && typeof layout === "object" ? layout : {};
+  const groups = base.groups && typeof base.groups === "object" ? base.groups : {};
+
+  const out = {
+    maxGroupColumns: clampNumber(base.maxGroupColumns, 1, 4, 3),
+    groups: {},
+  };
+
+  for (const c of categories || []) {
+    const source = groups[c.id] && typeof groups[c.id] === "object" ? groups[c.id] : {};
+    out.groups[c.id] = {
+      style: source.style === "row" ? "row" : "column",
+      columns: clampNumber(source.columns, 1, 6, 3),
+      collapsed: !!source.collapsed,
+    };
+  }
+
+  return out;
+}
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(n)));
 }
 
 function findLink(data, linkId) {
@@ -360,7 +413,7 @@ function applyReorder(stored, patch) {
 
   const existing = new Set(nextCats.map((c) => c.id));
   for (const c of stored.categories) if (!existing.has(c.id)) nextCats.push(c);
-  return { categories: nextCats };
+  return { categories: nextCats, layout: stored.layout };
 }
 
 function faviconFromUrl(u) {
@@ -861,31 +914,86 @@ function renderDashboardPage(data) {
       top: calc(var(--topbar-h) + var(--gap));
       bottom:0;
       padding: 0 18px 22px;
-      overflow:hidden;
+      overflow:auto;
       z-index:1;
     }
-    .sections{height:100%;transition:transform 520ms cubic-bezier(.2,.8,.2,1);will-change:transform}
-    .section{
-      height: calc(100vh - var(--topbar-h) - var(--gap));
+    .sections{
       max-width:1240px;margin:0 auto;
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:14px;
+      align-content:start;
       padding: 10px 0 40px;
     }
 
+    .section{
+      background: var(--panel);
+      backdrop-filter: blur(14px);
+      border:1px solid var(--border);
+      border-radius: 18px;
+      padding:12px;
+      box-shadow: 0 10px 28px rgba(0,0,0,.10);
+      min-height:130px;
+    }
+
     .section-title{
-      font-size:1.08rem;
+      font-size:1.02rem;
       color: var(--text);
       font-weight:980;
-      margin:10px 0 14px;
-      padding-left:1rem;
-      border-left:4px solid rgba(45,212,191,.9);
+      margin:0;
+      padding:4px 2px 10px;
+      border-bottom:1px solid var(--border);
       display:flex;align-items:center;justify-content:space-between;
       letter-spacing:.02em;
     }
+    .section-meta{
+      display:flex;align-items:center;gap:8px;
+      font-size:.76rem;color:var(--muted);font-weight:900;
+    }
+    .count-pill{
+      border:1px solid var(--border);
+      border-radius:999px;
+      padding:4px 8px;
+      background: rgba(255,255,255,.04);
+    }
+    :root[data-theme="light"] .count-pill{ background: rgba(2,6,23,.04); }
+    .collapse-btn{
+      border:1px solid var(--border);
+      background: rgba(255,255,255,.06);
+      color:var(--text);
+      border-radius:10px;
+      font-size:.76rem;
+      font-weight:950;
+      padding:4px 8px;
+      cursor:pointer;
+      transition:.15s;
+    }
+    :root[data-theme="light"] .collapse-btn{ background: rgba(2,6,23,.04); }
+    .collapse-btn:hover{ border-color: rgba(45,212,191,.30); }
 
     .grid{
       display:grid;
-      grid-template-columns:repeat(auto-fill,minmax(230px,1fr));
-      gap:1.05rem
+      gap:.85rem;
+      margin-top:10px;
+    }
+    .section.mode-column .grid{
+      grid-template-columns:repeat(var(--group-cols,3), minmax(0,1fr));
+    }
+    .section.mode-row .grid{
+      display:flex;
+      overflow:auto;
+      padding-bottom:2px;
+      scrollbar-width: thin;
+    }
+    .section.mode-row .card{
+      width:240px;
+      min-width:220px;
+      max-width:260px;
+      flex:0 0 auto;
+    }
+    .section.collapsed .grid,
+    .section.collapsed .empty-hint{
+      display:none;
     }
 
     .card{
@@ -960,27 +1068,11 @@ function renderDashboardPage(data) {
     :root[data-theme="light"] .mini{ background: rgba(2,6,23,.04); }
     .mini:hover{border-color:rgba(45,212,191,.30)}
     .mini.d:hover{border-color:rgba(251,113,133,.45);color:var(--danger)}
-
-    .dots{
-      position:fixed;right:16px;top:50%;transform:translateY(-50%);
-      display:flex;flex-direction:column;gap:10px;z-index:25;user-select:none;
-      padding:10px;
-      border-radius:999px;
-      background: rgba(255,255,255,.04);
-      border: 1px solid var(--border);
-      backdrop-filter: blur(12px);
-    }
-    :root[data-theme="light"] .dots{ background: rgba(255,255,255,.55); }
-    .dot{
-      width:10px;height:10px;border-radius:999px;border:1px solid var(--border);
-      background: rgba(255,255,255,.10);
-      cursor:pointer;transition:.15s
-    }
-    :root[data-theme="light"] .dot{background: rgba(2,6,23,.08);}
-    .dot.active{
-      background: rgba(45,212,191,.95);
-      border-color: rgba(45,212,191,.95);
-      transform:scale(1.25)
+    .empty-hint{
+      margin:8px 2px 0;
+      color:var(--muted);
+      font-weight:900;
+      font-size:.9rem;
     }
 
     .fab{
@@ -1098,6 +1190,68 @@ select optgroup {
     }
     :root[data-theme="light"] .dragtag{background: rgba(2,6,23,.04);}
 
+    .layoutlist{display:flex;flex-direction:column;gap:10px}
+    .layoutitem{
+      padding:12px;
+      border-radius:16px;
+      border:1px solid var(--border);
+      background: rgba(255,255,255,.04);
+    }
+    :root[data-theme="light"] .layoutitem{ background: rgba(2,6,23,.03); }
+    .layouthead{
+      display:flex;align-items:center;justify-content:space-between;gap:8px;
+      margin-bottom:10px;
+    }
+    .layoutname{
+      font-weight:980;color:var(--text);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    }
+    .layoutcount{
+      font-size:.8rem;font-weight:900;color:var(--muted);
+      border:1px solid var(--border);
+      border-radius:999px;
+      padding:4px 8px;
+      background: rgba(255,255,255,.04);
+      flex:0 0 auto;
+    }
+    :root[data-theme="light"] .layoutcount{ background: rgba(2,6,23,.04); }
+    .layoutcontrols{
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:10px;
+      align-items:end;
+    }
+    .layoutcontrols .ctrl{
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+    }
+    .layoutcontrols .ctrl span{
+      color:var(--muted);
+      font-size:.82rem;
+      font-weight:900;
+    }
+    .layoutcontrols .ctrl.checkbox{
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:8px 10px;
+      background: rgba(255,255,255,.03);
+      display:flex;
+      flex-direction:row;
+      justify-content:space-between;
+      align-items:center;
+      min-height:44px;
+    }
+    :root[data-theme="light"] .layoutcontrols .ctrl.checkbox{ background: rgba(2,6,23,.03); }
+    .layoutcontrols .ctrl.checkbox input{
+      width:18px;
+      height:18px;
+      accent-color: var(--primary);
+      padding:0;
+      border:none;
+      background:transparent;
+      cursor:pointer;
+    }
+
     .toast{
       position:fixed;left:50%;bottom:18px;transform:translateX(-50%);
       background: var(--panel);
@@ -1110,9 +1264,11 @@ select optgroup {
 
     @media (max-width:768px){
       .row{grid-template-columns:1fr}
-      .dots{right:10px}
-      .grid{grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:1rem}
+      .sections{grid-template-columns:1fr}
+      .section.mode-column .grid{grid-template-columns:1fr}
+      .section.mode-row .card{width:220px;min-width:200px}
       .card{padding:1.05rem .95rem}
+      .layoutcontrols{grid-template-columns:1fr}
       .brand h1{font-size:1.55rem}
       .searchbar{padding:10px}
     }
@@ -1130,6 +1286,7 @@ select optgroup {
         <div class="actions">
           <button class="pill" id="btnTheme" title="切换亮/暗">🌙</button>
           <button class="pill" id="btnManage">🧩 管理分类</button>
+          <button class="pill" id="btnLayout">🧱 布局设置</button>
           <a class="pill danger" href="/logout">🚪 退出</a>
         </div>
       </div>
@@ -1144,8 +1301,6 @@ select optgroup {
   <div class="viewport">
     <div class="sections" id="sections"></div>
   </div>
-
-  <div class="dots" id="dots"></div>
 
   <div class="fab">
     <button id="btnAdd">➕ 添加链接</button>
@@ -1207,6 +1362,32 @@ select optgroup {
     </div>
   </div>
 
+  <!-- Layout Manager Modal -->
+  <div class="mask" id="maskLayout">
+    <div class="modal">
+      <header>
+        <h3>布局设置</h3>
+        <button class="close" id="closeLayout">关闭</button>
+      </header>
+      <div class="body">
+        <div class="field">
+          <label>每行最大分组数（maxGroupColumns）</label>
+          <select id="layoutMaxCols">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+          </select>
+        </div>
+        <div class="layoutlist" id="layoutList"></div>
+      </div>
+      <footer>
+        <button class="btn secondary" id="cancelLayout">取消</button>
+        <button class="btn primary" id="saveLayout">保存布局</button>
+      </footer>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script>
@@ -1234,19 +1415,18 @@ select optgroup {
 
     const state = {
       data: ${safeData},
-      index: 0,
-      lock: false,
-      lockMs: 650,
       editing: null, // {linkId, categoryId}
-      catOrder: null
+      catOrder: null,
+      layout: { maxGroupColumns: 3, groups: {} },
+      layoutDraft: null,
     };
 
     const elSections = document.getElementById("sections");
-    const elDots = document.getElementById("dots");
     const toastEl = document.getElementById("toast");
 
     const maskLink = document.getElementById("maskLink");
     const maskCats = document.getElementById("maskCats");
+    const maskLayout = document.getElementById("maskLayout");
 
     const linkModalTitle = document.getElementById("linkModalTitle");
     const linkCategory = document.getElementById("linkCategory");
@@ -1254,8 +1434,12 @@ select optgroup {
     const linkTitle = document.getElementById("linkTitle");
     const linkUrl = document.getElementById("linkUrl");
     const linkIcon = document.getElementById("linkIcon");
+    const layoutList = document.getElementById("layoutList");
+    const layoutMaxCols = document.getElementById("layoutMaxCols");
 
     document.getElementById("btnTheme").onclick = ()=> window.__toggleTheme && window.__toggleTheme();
+    state.layout = normalizeLayoutConfig(state.data?.layout, state.data.categories || []);
+    state.data.layout = state.layout;
 
     function toast(msg){
       toastEl.textContent = msg;
@@ -1273,49 +1457,98 @@ select optgroup {
       try { return new URL(u).origin } catch { return u }
     }
 
+    function clamp(n, min, max){
+      const x = Number(n);
+      if(!Number.isFinite(x)) return min;
+      return Math.max(min, Math.min(max, Math.round(x)));
+    }
+
+    function defaultGroupLayout(){
+      return { style: "column", columns: 3, collapsed: false };
+    }
+
+    function normalizeLayoutConfig(raw, categories){
+      const base = raw && typeof raw === "object" ? raw : {};
+      const srcGroups = base.groups && typeof base.groups === "object" ? base.groups : {};
+      const next = {
+        maxGroupColumns: clamp(base.maxGroupColumns || 3, 1, 4),
+        groups: {},
+      };
+
+      for(const c of (categories || [])){
+        const source = srcGroups[c.id] || {};
+        next.groups[c.id] = {
+          style: source.style === "row" ? "row" : "column",
+          columns: clamp(source.columns || 3, 1, 6),
+          collapsed: !!source.collapsed,
+        };
+      }
+      return next;
+    }
+
+    function ensureLayoutConfig(){
+      state.layout = normalizeLayoutConfig(state.layout, state.data.categories || []);
+      state.data.layout = state.layout;
+    }
+
+    function applyData(nextData){
+      state.data = nextData || { categories: [] };
+      state.layout = normalizeLayoutConfig(state.data.layout, state.data.categories || []);
+      state.data.layout = state.layout;
+    }
+
+    async function saveLayoutToServer(layout, silent = false){
+      try{
+        const res = await fetch("/api/layout", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ layout }),
+        });
+        const out = await res.json();
+        if(!res.ok){
+          if(!silent) toast(out?.error || "布局保存失败");
+          return false;
+        }
+        applyData(out.data);
+        return true;
+      }catch{
+        if(!silent) toast("网络错误");
+        return false;
+      }
+    }
+
     function applyTopbarVar(){
       const tb = document.getElementById("topbar");
       const h = tb ? tb.offsetHeight : 144;
       document.documentElement.style.setProperty("--topbar-h", h + "px");
     }
 
-    function applyTransform(){
-      const sectionEl = document.querySelector(".section");
-      const vh = sectionEl ? sectionEl.offsetHeight : (window.innerHeight - 160);
-      elSections.style.transform = "translateY(" + (-state.index * vh) + "px)";
-      document.querySelectorAll(".dot").forEach((d,i)=>d.classList.toggle("active", i===state.index));
+    function applyLayoutColumns(){
+      const maxCols = clamp(state.layout?.maxGroupColumns || 3, 1, 4);
+      let cols = maxCols;
+      if(window.innerWidth <= 760) cols = 1;
+      else if(window.innerWidth <= 1180) cols = Math.min(maxCols, 2);
+      else if(window.innerWidth <= 1520) cols = Math.min(maxCols, 3);
+      elSections.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
     }
 
-    function goTo(i){
-      const max = (state.data.categories?.length || 1) - 1;
-      state.index = Math.max(0, Math.min(max, i));
-      applyTransform();
-    }
-
-    function wheelHandler(e){
-      e.preventDefault();
-      if (state.lock) return;
-      state.lock = true;
-      setTimeout(()=>state.lock=false, state.lockMs);
-
-      const dir = e.deltaY > 0 ? 1 : -1;
-      goTo(state.index + dir);
-    }
-
-    window.addEventListener("resize", ()=>{ applyTopbarVar(); applyTransform(); });
-    document.addEventListener("wheel", wheelHandler, { passive:false });
+    window.addEventListener("resize", ()=>{
+      applyTopbarVar();
+      applyLayoutColumns();
+    });
 
     function render(){
+      ensureLayoutConfig();
       const cats = state.data.categories || [];
-
-      elDots.innerHTML = cats.map((_, i)=>\`<div class="dot \${i===state.index?"active":""}" data-i="\${i}"></div>\`).join("");
-      elDots.querySelectorAll(".dot").forEach(d=>{
-        d.onclick = ()=> goTo(Number(d.dataset.i));
-      });
 
       linkCategory.innerHTML = cats.map(c=>\`<option value="\${escapeAttr(c.id)}">\${escapeHtml(c.name)}</option>\`).join("");
 
       elSections.innerHTML = cats.map((c) => {
+        const cfg = state.layout.groups[c.id] || defaultGroupLayout();
+        const modeClass = cfg.style === "row" ? "mode-row" : "mode-column";
+        const collapsedClass = cfg.collapsed ? "collapsed" : "";
+        const groupCols = clamp(cfg.columns || 3, 1, 6);
+
         const links = (c.links || []).map(l => {
           const icon = l.icon || "";
           return \`
@@ -1336,23 +1569,52 @@ select optgroup {
         }).join("");
 
         const emptyHint = (c.links||[]).length ? "" : \`
-          <div style="margin:10px 0 0;color:var(--muted);font-weight:900;">
+          <div class="empty-hint">
             这个分类还没有链接，点右下角 ➕ 添加
           </div>\`;
 
         return \`
-          <section class="section" data-section-cat="\${escapeAttr(c.id)}">
-            <div class="section-title"><span>\${escapeHtml(c.name)}</span></div>
+          <section
+            class="section \${modeClass} \${collapsedClass}"
+            data-section-cat="\${escapeAttr(c.id)}"
+            style="--group-cols:\${groupCols};"
+          >
+            <div class="section-title">
+              <span>\${escapeHtml(c.name)}</span>
+              <div class="section-meta">
+                <span class="count-pill">\${(c.links||[]).length} 个链接</span>
+                <button class="collapse-btn" data-collapse="\${escapeAttr(c.id)}">
+                  \${cfg.collapsed ? "展开" : "折叠"}
+                </button>
+              </div>
+            </div>
             <div class="grid" data-grid-cat="\${escapeAttr(c.id)}">\${links}</div>
             \${emptyHint}
           </section>\`;
       }).join("");
 
+      wireGroupCollapse();
       wireCardButtons();
       wireDragDropLinks();
 
       applyTopbarVar();
-      applyTransform();
+      applyLayoutColumns();
+    }
+
+    function wireGroupCollapse(){
+      document.querySelectorAll("[data-collapse]").forEach(btn=>{
+        btn.addEventListener("click", async (e)=>{
+          e.preventDefault();
+          e.stopPropagation();
+          const cid = btn.dataset.collapse;
+          const cfg = state.layout.groups[cid] || defaultGroupLayout();
+          cfg.collapsed = !cfg.collapsed;
+          state.layout.groups[cid] = cfg;
+          state.data.layout = state.layout;
+          render();
+          await saveLayoutToServer(state.layout, true);
+        });
+      });
     }
 
     function wireCardButtons(){
@@ -1435,7 +1697,7 @@ select optgroup {
           });
           const out = await res.json();
           if(!res.ok) return toast(out?.error || "失败");
-          state.data = out.data;
+          applyData(out.data);
           render();
           closeLinkModal();
           toast("已添加");
@@ -1451,7 +1713,7 @@ select optgroup {
           });
           const out = await res.json();
           if(!res.ok) return toast(out?.error || "失败");
-          state.data = out.data;
+          applyData(out.data);
           render();
           closeLinkModal();
           toast("已更新");
@@ -1470,7 +1732,7 @@ select optgroup {
         });
         const out = await res.json();
         if(!res.ok) return toast(out?.error || "失败");
-        state.data = out.data;
+        applyData(out.data);
         render();
         toast("已删除");
       }catch(e){
@@ -1581,7 +1843,7 @@ select optgroup {
         });
         const out = await res.json();
         if(!res.ok) return toast(out?.error || "保存失败");
-        state.data = out.data;
+        applyData(out.data);
       }catch(e){
         toast("网络错误");
       }
@@ -1589,6 +1851,7 @@ select optgroup {
 
     // ---------- Category Manager ----------
     const btnManage = document.getElementById("btnManage");
+    const btnLayout = document.getElementById("btnLayout");
     const catlist = document.getElementById("catlist");
 
     function openCats(){
@@ -1653,7 +1916,7 @@ select optgroup {
         });
         const out = await res.json();
         if(!res.ok) return toast(out?.error || "失败");
-        state.data = out.data;
+        applyData(out.data);
         renderCatList();
         render();
         toast("已重命名");
@@ -1693,12 +1956,9 @@ select optgroup {
         const out = await res.json();
         if(!res.ok) return toast(out?.error || "删除失败");
 
-        state.data = out.data;
+        applyData(out.data);
 
         if(state.catOrder) state.catOrder = state.catOrder.filter(id=>id!==categoryId);
-
-        const max = (state.data.categories?.length || 1) - 1;
-        if(state.index > max) state.index = max;
 
         renderCatList();
         render();
@@ -1759,12 +2019,112 @@ select optgroup {
       const byId = new Map(cats.map(c=>[c.id,c]));
       const nextCats = order.map(id=>byId.get(id)).filter(Boolean);
       for(const c of cats) if(!nextCats.some(x=>x.id===c.id)) nextCats.push(c);
-      state.data.categories = nextCats;
+      applyData({ categories: nextCats });
 
       closeCats();
       render();
       await persistReorder();
       toast("已保存");
+    };
+
+    // ---------- Layout Manager ----------
+    function openLayout(){
+      ensureLayoutConfig();
+      state.layoutDraft = normalizeLayoutConfig(state.layout, state.data.categories || []);
+      layoutMaxCols.value = String(state.layoutDraft.maxGroupColumns || 3);
+      renderLayoutList();
+      maskLayout.style.display = "flex";
+    }
+
+    function closeLayout(){
+      maskLayout.style.display = "none";
+      state.layoutDraft = null;
+    }
+
+    function renderLayoutList(){
+      const cats = state.data.categories || [];
+      if(!state.layoutDraft) {
+        state.layoutDraft = normalizeLayoutConfig(state.layout, cats);
+      }
+
+      layoutList.innerHTML = cats.map(c=>{
+        const cfg = state.layoutDraft.groups[c.id] || defaultGroupLayout();
+        const cols = clamp(cfg.columns || 3, 1, 6);
+        return \`
+          <div class="layoutitem">
+            <div class="layouthead">
+              <div class="layoutname">\${escapeHtml(c.name)}</div>
+              <div class="layoutcount">\${(c.links||[]).length} 个链接</div>
+            </div>
+            <div class="layoutcontrols">
+              <label class="ctrl">
+                <span>布局模式</span>
+                <select data-layout-field="style" data-layout-cid="\${escapeAttr(c.id)}">
+                  <option value="column" \${cfg.style === "column" ? "selected" : ""}>column</option>
+                  <option value="row" \${cfg.style === "row" ? "selected" : ""}>row</option>
+                </select>
+              </label>
+              <label class="ctrl">
+                <span>列数</span>
+                <select data-layout-field="columns" data-layout-cid="\${escapeAttr(c.id)}">
+                  <option value="1" \${cols===1 ? "selected" : ""}>1</option>
+                  <option value="2" \${cols===2 ? "selected" : ""}>2</option>
+                  <option value="3" \${cols===3 ? "selected" : ""}>3</option>
+                  <option value="4" \${cols===4 ? "selected" : ""}>4</option>
+                  <option value="5" \${cols===5 ? "selected" : ""}>5</option>
+                  <option value="6" \${cols===6 ? "selected" : ""}>6</option>
+                </select>
+              </label>
+              <label class="ctrl checkbox">
+                <span>默认折叠</span>
+                <input type="checkbox" data-layout-field="collapsed" data-layout-cid="\${escapeAttr(c.id)}" \${cfg.collapsed ? "checked" : ""}>
+              </label>
+            </div>
+          </div>\`;
+      }).join("");
+
+      wireLayoutControls();
+    }
+
+    function wireLayoutControls(){
+      document.querySelectorAll("[data-layout-field]").forEach(el=>{
+        el.addEventListener("change", ()=>{
+          if(!state.layoutDraft) return;
+          const cid = el.dataset.layoutCid;
+          const field = el.dataset.layoutField;
+          const cfg = state.layoutDraft.groups[cid] || defaultGroupLayout();
+
+          if(field === "style"){
+            cfg.style = el.value === "row" ? "row" : "column";
+          } else if(field === "columns"){
+            cfg.columns = clamp(el.value || 3, 1, 6);
+          } else if(field === "collapsed"){
+            cfg.collapsed = !!el.checked;
+          }
+          state.layoutDraft.groups[cid] = cfg;
+        });
+      });
+    }
+
+    btnLayout.onclick = openLayout;
+    document.getElementById("closeLayout").onclick = closeLayout;
+    document.getElementById("cancelLayout").onclick = closeLayout;
+    maskLayout.addEventListener("click", (e)=>{ if(e.target===maskLayout) closeLayout(); });
+
+    layoutMaxCols.addEventListener("change", ()=>{
+      if(!state.layoutDraft) return;
+      state.layoutDraft.maxGroupColumns = clamp(layoutMaxCols.value || 3, 1, 4);
+    });
+
+    document.getElementById("saveLayout").onclick = async ()=>{
+      if(!state.layoutDraft) return;
+      state.layoutDraft.maxGroupColumns = clamp(layoutMaxCols.value || state.layoutDraft.maxGroupColumns || 3, 1, 4);
+      const nextLayout = normalizeLayoutConfig(state.layoutDraft, state.data.categories || []);
+      const ok = await saveLayoutToServer(nextLayout);
+      if(!ok) return;
+      closeLayout();
+      render();
+      toast("布局已保存");
     };
 
     // ---------- init ----------
