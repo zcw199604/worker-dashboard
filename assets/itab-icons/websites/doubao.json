@@ -1,0 +1,20 @@
+[
+  {
+    "id": "655b631920f1d5ceb732b2fe",
+    "name": "豆包-你的AI朋友",
+    "url": "https://www.doubao.com?channel=itab2&source=hw_db_itab_01",
+    "image_url": "https://files.codelife.cc/icons/doubao.com.webp",
+    "local_path": "assets/itab-icons/websites/doubao.com_880ef4e45e.webp",
+    "backgroundColor": "#ffffff",
+    "description": "豆包是你的智能小助手，可以为你答疑解惑，提供灵感，辅助创作，也可以和你畅聊任何你感兴趣的话题。"
+  },
+  {
+    "id": "66c8496319493e39b899f5a9",
+    "name": "豆包MarsCode",
+    "url": "https://marscode.cn/?utm_source=itab.link&utm_medium=xycpa&utm_campaign=",
+    "image_url": "https://files.codelife.cc/icons/marscode.cn.svg",
+    "local_path": "assets/itab-icons/websites/marscode.cn_dcf61816ef.svg",
+    "backgroundColor": "#fff",
+    "description": "豆包旗下的编程助手，提供智能补全、智能预测、智能问答等能力，节省开发时间，释放脑海中的创造力"
+  }
+]
