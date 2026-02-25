@@ -1529,7 +1529,7 @@ select optgroup {
       if(window.innerWidth <= 760) cols = 1;
       else if(window.innerWidth <= 1180) cols = Math.min(maxCols, 2);
       else if(window.innerWidth <= 1520) cols = Math.min(maxCols, 3);
-      elSections.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+      elSections.style.gridTemplateColumns = "repeat(" + cols + ", minmax(0, 1fr))";
     }
 
     window.addEventListener("resize", ()=>{
